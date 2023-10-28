@@ -1,0 +1,79 @@
+import java.util.Scanner;
+
+public class Factura {
+    private String codigoProducto;
+    private String descripcionProducto;
+    private double cantidadComprada;
+    private double precioPorLitro;
+
+    public Factura(String codigo, String descripcion, double cantidad, double precio) {
+        codigoProducto = codigo;
+        descripcionProducto = descripcion;
+        cantidadComprada = cantidad;
+        precioPorLitro = precio;
+    }
+
+    public void setCodigoProducto(String codigo) {
+        codigoProducto = codigo;
+    }
+
+    public String getCodigoProducto() {
+        return codigoProducto;
+    }
+
+    public void setDescripcionProducto(String descripcion) {
+        descripcionProducto = descripcion;
+    }
+
+    public String getDescripcionProducto() {
+        return descripcionProducto;
+    }
+
+    public void setCantidadComprada(double cantidad) {
+        cantidadComprada = cantidad;
+    }
+
+    public double getCantidadComprada() {
+        return cantidadComprada;
+    }
+
+    public void setPrecioPorLitro(double precio) {
+        precioPorLitro = precio;
+    }
+
+    public double getPrecioPorLitro() {
+        return precioPorLitro;
+    }
+
+    public double getTotalFactura() {
+        double calculoDelMontoTotal;
+        calculoDelMontoTotal = cantidadComprada * precioPorLitro;
+        return calculoDelMontoTotal;
+    }
+
+    public static void main(String[] args) {
+        Scanner input = new Scanner(System.in);
+        String codigo, descripcion;
+        double cantidad, precio;
+
+        System.out.println("Ingrese el código del producto: ");
+        codigo = input.nextLine();
+
+        System.out.println("Ingrese la descripción del producto: ");
+        descripcion = input.nextLine();
+
+        System.out.println("Ingrese el precio por litro: ");
+        precio = input.nextDouble();
+
+        System.out.println("Ingrese la cantidad a comprar del producto: ");
+        cantidad = input.nextDouble();
+
+        Factura factura = new Factura(codigo, descripcion, cantidad, precio);
+
+        System.out.printf("\nCódigo del producto: %s", factura.getCodigoProducto());
+        System.out.printf("\nDescripción del producto: %s", factura.getDescripcionProducto());
+        System.out.printf("\nPrecio por litro: %.2f", factura.getPrecioPorLitro());
+        System.out.printf("\nCantidad en litros: %.2f", factura.getCantidadComprada());
+        System.out.printf("\nEl total de la factura es: $%.2f\n", factura.getTotalFactura());
+    }
+}
