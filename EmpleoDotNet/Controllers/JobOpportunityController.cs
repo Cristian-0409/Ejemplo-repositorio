@@ -12,6 +12,12 @@ using System;
 using System.Net;
 using EmpleoDotNet.Core.Domain;
 using Microsoft.AspNet.Identity;
+using EmpleoDotNet.Services.Social.Slack;
+using System.Configuration;
+using EmpleoDotNet.ViewModel.Slack;
+using System.Linq;
+using Newtonsoft.Json;
+using System.Configuration;
 
 namespace EmpleoDotNet.Controllers
 {
@@ -49,8 +55,14 @@ namespace EmpleoDotNet.Controllers
             var jobOpportunity = _jobOpportunityService.GetJobOpportunityById(jobOpportunityId);
 
             if (jobOpportunity == null)
-                return View(nameof(Index))
+                return View(nameof(Detail))
                     .WithError("La vacante solicitada no existe. Por favor escoge una vacante válida del listado");
+
+            if (jobOpportunity.Approved == false)
+                return View(nameof(Detail))
+                    .WithSuccess("Esta vacante no ha sido aprobada todavia. Si la acaba de someter, por favor revise de nuevo más tarde. Nuestros moderadores estarán revisando su solicitud en breve." +
+                    "Mientras tanto, puedes te sugerimos que contemples convertirte en un backer de nuestra plataforma. Más detalles en https://opencollective.com/emplea_do" +
+                    "");
 
             var expectedUrl = UrlHelperExtensions.SeoUrl(jobOpportunityId, jobOpportunity.Title.SanitizeUrl());
 
@@ -81,13 +93,14 @@ namespace EmpleoDotNet.Controllers
 
         [HttpGet]
 
-        [Authorize]
         public ActionResult New()
         {
+            return Redirect("https://beta.emplea.do");
             var viewModel = new NewJobOpportunityViewModel();
+            viewModel.MapsApiKey = ConfigurationManager.AppSettings["GoogleMapsApiKey"];
 
             return View(viewModel)
-                .WithInfo("Prueba nuestro nuevo proceso guiado de creación de posiciones haciendo <b><a href='" + Url.Action("Wizard") + "'>click aquí</a></b>");
+                .WithWarning("Prueba nuestro nuevo proceso guiado de creación de posiciones haciendo <b><a href='" + Url.Action("Wizard") + "'>click aquí</a></b>");
         }
 
         [HttpPost, ValidateAntiForgeryToken]
@@ -108,17 +121,24 @@ namespace EmpleoDotNet.Controllers
                 return View(model).WithError("Debe seleccionar una Localidad.");
             }
 
-            if (!string.IsNullOrWhiteSpace(model.CompanyLogoUrl) && !UrlHelperExtensions.IsImageAvailable(model.CompanyLogoUrl))
+            if (!string.IsNullOrWhiteSpace(model.CompanyLogoUrl) && UrlHelperExtensions.IsValidImageUrl(model.CompanyLogoUrl))
             {
                 return View(model).WithError("La url del logo debe ser a una imagen en formato png o jpg");
             }
 
             var jobOpportunity = model.ToEntity();
             var userId = User.Identity.GetUserId();
+            jobOpportunity.Approved = false;        // new jobs unapproved by default
 
             _jobOpportunityService.CreateNewJobOpportunity(jobOpportunity, userId);
-
-            await _twitterService.PostNewJobOpportunity(jobOpportunity, Url).ConfigureAwait(false);
+            try
+            {
+                await _slackService.PostNewJobOpportunity(jobOpportunity, Url).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Elmah.ErrorSignal.FromCurrentContext().Raise(ex);
+            }
 
             return RedirectToAction(nameof(Detail), new
             {
@@ -129,8 +149,9 @@ namespace EmpleoDotNet.Controllers
         [HttpGet]
         public ActionResult Wizard()
         {
+            return Redirect("https://beta.emplea.do");
             var viewModel = new Wizard();
-
+            viewModel.MapsApiKey = ConfigurationManager.AppSettings["GoogleMapsApiKey"];
             return View(viewModel);
         }
 
@@ -193,6 +214,7 @@ namespace EmpleoDotNet.Controllers
 
             if (!jobExists)
             {
+                jobOpportunity.Approved = false;        // new jobs unapproved by default
                 _jobOpportunityService.CreateNewJobOpportunity(jobOpportunity, User.Identity.GetUserId());
             }
             else
@@ -200,7 +222,14 @@ namespace EmpleoDotNet.Controllers
                 _jobOpportunityService.UpdateJobOpportunity(model.Id, model.ToEntity());
             }
 
-            await _twitterService.PostNewJobOpportunity(jobOpportunity, Url);
+            try
+            {
+                await _slackService.PostNewJobOpportunity(jobOpportunity, Url);
+            }
+            catch (Exception ex)
+            {
+                Elmah.ErrorSignal.FromCurrentContext().Raise(ex);
+            }
 
             return RedirectToAction(nameof(Detail), new
             {
@@ -232,6 +261,58 @@ namespace EmpleoDotNet.Controllers
                     jobOpportunity.Likes,
                     jobOpportunity.DisLikes
                 }});
+        }
+
+        /// <summary>
+        /// Validates the payload response that comes from the Slack interactive message actions
+        /// </summary>
+        /// <param name="model"></param>
+        /// <returns></returns>
+        [HttpPost]
+        [ValidateInput(false)]
+        public async Task Validate()
+        {
+            var payload = JsonConvert.DeserializeObject<PayloadResponseDto>(Request["payload"]);
+            int jobOpportunityId = Convert.ToInt32(payload.callback_id);
+            var jobOpportunity = _jobOpportunityService.GetJobOpportunityById(jobOpportunityId);
+            var isJobApproved = payload.actions.FirstOrDefault()?.value == "approve";
+            var isJobRejected = payload.actions.FirstOrDefault()?.value == "reject";
+            var isTokenValid = payload.token == ConfigurationManager.AppSettings["slackVerificationToken"];
+
+            try
+            {
+                if (isTokenValid && isJobApproved)
+                {
+                    jobOpportunity.Approved = true;
+                    _jobOpportunityService.UpdateJobOpportunity(jobOpportunityId, jobOpportunity);
+                    await _slackService
+                        .PostJobOpportunityResponse(jobOpportunity, Url, payload.response_url, payload?.user?.id, true);
+                    await _twitterService
+                        .PostNewJobOpportunity(jobOpportunity, Url).ConfigureAwait(false);
+                }
+                else if (isTokenValid && isJobRejected)
+                {
+                    // Jobs are rejected by default, so there's no need to update the DB
+                    if (jobOpportunity == null)
+                    {
+                        await _slackService.PostJobOpportunityErrorResponse(jobOpportunity, Url, payload.response_url);
+                    } 
+                    else
+                    {
+                        await _slackService.PostJobOpportunityResponse(jobOpportunity, Url, payload.response_url, payload?.user?.id, false);
+                    }
+                }
+                else
+                {
+                    Response.StatusCode = (int)HttpStatusCode.BadRequest;
+                }
+            }
+            catch (Exception ex)
+            {
+                //Catches exceptions so that the raw HTML doesn't appear on the slack channel
+                await _slackService.PostJobOpportunityErrorResponse(jobOpportunity, Url, payload.response_url);
+                Elmah.ErrorSignal.FromCurrentContext().Raise(ex);
+            }
         }
 
         /// <summary>
@@ -294,13 +375,16 @@ namespace EmpleoDotNet.Controllers
 
         public JobOpportunityController(
             IJobOpportunityService jobOpportunityService,
+            ISlackService slackService,
             ITwitterService twitterService)
         {
             _jobOpportunityService = jobOpportunityService;
+            _slackService = slackService;
             _twitterService = twitterService;
         }
 
         private readonly IJobOpportunityService _jobOpportunityService;
         private readonly ITwitterService _twitterService;
+        private readonly ISlackService _slackService;
     }
 }
